@@ -1,0 +1,178 @@
+
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn()
+        && request.auth.uid == 'u3YhoxScfghCdlMzHKOFQvzyjIz1';
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    function isBlocked() {
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('blocked', false) == true;
+    }
+
+    function isPostingDisabled() {
+      return exists(/databases/$(database)/documents/siteSettings/main)
+        && (
+          get(/databases/$(database)/documents/siteSettings/main).data.get('maintenanceMode', false) == true
+          || get(/databases/$(database)/documents/siteSettings/main).data.get('postingDisabled', false) == true
+        );
+    }
+
+    function hasDeletionPending() {
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('deletionStatus', 'none') != 'none';
+    }
+
+    function validDeleteAt(value) {
+      return value is timestamp
+        && value >= request.time + duration.value(25, 'd')
+        && value <= request.time + duration.value(35, 'd');
+    }
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+
+      allow create: if isOwner(userId)
+        && request.resource.data.blocked == false
+        && !('deleteAt' in request.resource.data)
+        && !('deletionStatus' in request.resource.data);
+
+      allow update: if isAdmin()
+        || (
+          isOwner(userId)
+          && (
+            request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['name', 'photoURL'])
+            || (
+              resource.data.get('blocked', false) != true
+              && resource.data.get('deletionStatus', 'none') == 'none'
+              && request.resource.data.deletionStatus == 'requested'
+              && request.resource.data.diff(resource.data).affectedKeys()
+                   .hasOnly(['deletionStatus', 'deletionRequestedAt', 'deleteAt'])
+              && validDeleteAt(request.resource.data.deleteAt)
+            )
+            || (
+              resource.data.get('deletionStatus', 'none') == 'requested'
+              && request.resource.data.deletionStatus == 'none'
+              && request.resource.data.diff(resource.data).affectedKeys()
+                   .hasOnly(['deletionStatus', 'deletionRequestedAt', 'deleteAt'])
+            )
+          )
+        );
+
+      allow delete: if isAdmin();
+    }
+
+    match /categories/{categoryId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /banners/{bannerId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /ads/{adId} {
+      allow read: if resource.data.status == 'active'
+        || isAdmin()
+        || (isSignedIn() && resource.data.userId == request.auth.uid);
+
+      allow create: if isSignedIn()
+        && !isBlocked()
+        && !hasDeletionPending()
+        && !isPostingDisabled()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.status == 'moderation'
+        && request.resource.data.isVip == false
+        && !('deleteAt' in request.resource.data)
+        && !('prevStatus' in request.resource.data)
+        && request.resource.data.title is string
+        && request.resource.data.title.size() > 0
+        && request.resource.data.title.size() <= 200
+        && request.resource.data.description is string
+        && request.resource.data.description.size() <= 5000
+        && request.resource.data.price is number
+        && request.resource.data.price >= 0
+        && request.resource.data.images is list
+        && request.resource.data.images.size() <= 5
+        && (!exists(/databases/$(database)/documents/siteSettings/main)
+          || request.resource.data.images.size() <= get(/databases/$(database)/documents/siteSettings/main).data.get('maxImages', 5))
+        && (request.resource.data.images.size() > 0
+          || (exists(/databases/$(database)/documents/siteSettings/main)
+            && get(/databases/$(database)/documents/siteSettings/main).data.get('requireImage', true) == false))
+        && (!exists(/databases/$(database)/documents/siteSettings/main)
+          || get(/databases/$(database)/documents/siteSettings/main).data.get('requirePhone', false) != true
+          || (request.resource.data.phone is string && request.resource.data.phone.size() > 0));
+
+      allow update: if isAdmin()
+        || (
+          isSignedIn()
+          && resource.data.userId == request.auth.uid
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['status', 'prevStatus', 'deleteAt', 'updatedAt'])
+          && (
+            (
+              !isBlocked()
+              && resource.data.status != 'hidden'
+              && request.resource.data.status == 'hidden'
+              && request.resource.data.prevStatus == resource.data.status
+              && validDeleteAt(request.resource.data.deleteAt)
+            )
+            || (
+              resource.data.status == 'hidden'
+              && request.resource.data.status == resource.data.prevStatus
+              && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('deletionStatus', 'none') == 'requested'
+            )
+          )
+        );
+
+      allow delete: if isAdmin();
+    }
+
+    match /siteSettings/{settingId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if isAdmin() || (isSignedIn() && resource.data.active == true && resource.data.audience == 'all');
+      allow write: if isAdmin();
+    }
+
+    match /reports/{reportId} {
+      allow read, update, delete: if isAdmin();
+      allow create: if isSignedIn()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.keys().hasOnly(['userId', 'adId', 'type', 'reason', 'message', 'status', 'createdAt']);
+    }
+
+    match /supportTickets/{ticketId} {
+      allow read, update, delete: if isAdmin();
+      allow create: if isSignedIn()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.keys().hasOnly(['userId', 'subject', 'message', 'status', 'createdAt', 'updatedAt']);
+    }
+
+    match /adminLogs/{logId} {
+      allow read, write: if isAdmin();
+    }
+
+    match /vipPlans/{planId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+  }
+}
